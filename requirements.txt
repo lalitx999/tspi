@@ -1,0 +1,8 @@
+Django>=4.2              # Web framework
+djangorestframework>=3.14 # REST API
+djangorestframework-simplejwt>=5.3  # JWT Auth
+django-cors-headers>=4.3 # CORS for Next.js
+psycopg2-binary>=2.9     # PostgreSQL driver
+python-dotenv>=1.0       # Environment variables
+pandas>=2.0              # Data import
+weasyprint>=69.0         # PDF report generation

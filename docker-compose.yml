@@ -1,0 +1,30 @@
+services:
+  # ------------------------------------------------------------
+  # TSPI Clinical AI Backend Service (Django)
+  # ------------------------------------------------------------
+  tspi_backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: tspi_backend
+    restart: always
+    ports:
+      - "8012:8000"
+    volumes:
+      - .:/app
+      - /mnt/tspidata:/mnt/tspidata:ro
+    env_file:
+      - .env
+    environment:
+      - DB_HOST=postgres_server
+      - DB_PORT=5432
+      - DB_NAME=drpatrcl_sys
+      - DB_USER=postgres
+      - DB_PASSWORD=661201123_Asd
+      - ALLOWED_HOSTS=*
+    networks:
+      - global_net
+
+networks:
+  global_net:
+    external: true

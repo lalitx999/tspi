@@ -262,7 +262,14 @@ def line_webhook(request):
 
                 elif action == "view_dashboard":
                     # Build and return 12 Health Domains Carousel Flex Message
-                    dashboard_flex = build_axes_dashboard_flex({}, patient.hn if patient else None)
+                    domain_scores = {}
+                    if patient:
+                        latest_record = patient.axes_records.order_by('-record_date').first()
+                        if latest_record:
+                            from .tspi_engine import calculate_tspi_analysis
+                            analysis = calculate_tspi_analysis(latest_record)
+                            domain_scores = analysis.get("system_scores", {})
+                    dashboard_flex = build_axes_dashboard_flex(domain_scores, patient.hn if patient else None)
                     if reply_token:
                         reply_line_message(reply_token, [dashboard_flex], channel_access_token)
 
@@ -302,6 +309,20 @@ def line_webhook(request):
                             reply_line_message(reply_token, [intake_flex], channel_access_token)
                         LineChat.objects.create(line_user_id=line_user_id, role="assistant", text=start_msg)
                         continue
+
+                # 2.7 Trigger: 39 Axes Dashboard ("39 แกน" or "แดชบอร์ด")
+                if msg_type == "text" and any(k in user_text.lower() for k in ["39 แกน", "39แกน", "แดชบอร์ด", "dashboard"]):
+                    domain_scores = {}
+                    if patient:
+                        latest_record = patient.axes_records.order_by('-record_date').first()
+                        if latest_record:
+                            from .tspi_engine import calculate_tspi_analysis
+                            analysis = calculate_tspi_analysis(latest_record)
+                            domain_scores = analysis.get("system_scores", {})
+                    dashboard_flex = build_axes_dashboard_flex(domain_scores, patient.hn if patient else None)
+                    if reply_token:
+                        reply_line_message(reply_token, [dashboard_flex], channel_access_token)
+                    continue
 
                 # Check if Bot is currently Active for this LINE user
                 last_sys_chat = LineChat.objects.filter(
@@ -512,6 +533,29 @@ def line_webhook(request):
                     # Save chat history
                     LineChat.objects.create(line_user_id=line_user_id, role="user", text=user_text)
                     LineChat.objects.create(line_user_id=line_user_id, role="assistant", text=clean_reply)
+
+                    # Save / Update Patient Case Summary & Real-time Symptoms directly into Database
+                    if patient:
+                        from django.utils import timezone
+                        now_str = timezone.now().strftime('%d/%m/%Y %H:%M')
+                        symptom_entry = f"[{now_str}] อาการที่ซักประวัติ: {user_text}"
+                        if patient.case_summary:
+                            patient.case_summary = f"{patient.case_summary}\n{symptom_entry}"
+                        else:
+                            patient.case_summary = symptom_entry
+                        
+                        extra = patient.extra_data or {}
+                        intake_history = extra.get("line_intake_history", [])
+                        intake_history.append({
+                            "timestamp": now_str,
+                            "user_text": user_text,
+                            "ai_reply": clean_reply
+                        })
+                        extra["line_intake_history"] = intake_history
+                        extra["last_reported_symptoms"] = user_text
+                        patient.extra_data = extra
+                        patient.save()
+                        print(f"💾 Recorded symptoms to Patient DB (HN: {patient.hn}): '{user_text}'")
 
                     # Check if scores exist to update PatientBiologicalRecord
                     if extracted_json and patient:

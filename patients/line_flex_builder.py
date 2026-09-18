@@ -318,12 +318,18 @@ def build_axes_dashboard_flex(domain_scores, patient_hn=None):
     """
     if not domain_scores:
         domain_scores = {
-            "Energy & Metabolism": 8,
-            "Vascular & Microcirculation": 7,
-            "Detoxification & Clearance": 9,
-            "Immune & Inflammation": 6,
-            "Autophagy & Proteostasis": 5,
-            "Genomic Stability": 4
+            "D1 Immune & Infection": 50,
+            "D2 Energy, Mito & Redox": 50,
+            "D3 Microbiome & Gut": 50,
+            "D4 Autophagy & Lysosome": 50,
+            "D5 Epigenomic & Genomic": 50,
+            "D6 Neuro–Endocrine": 50,
+            "D7 Vascular & Microcirc": 50,
+            "D8 Fibrosis & ECM": 50,
+            "D9 Stem Cell & Hematology": 50,
+            "D10 Connective & Bone": 50,
+            "D11 Organ Reserve Capacity": 50,
+            "D12 Oncology & Regulation": 50
         }
 
     cards = []

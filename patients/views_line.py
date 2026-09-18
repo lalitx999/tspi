@@ -77,6 +77,7 @@ def sanitize_to_flex_messages(messages):
 
 
 def reply_line_message(reply_token, messages, channel_access_token):
+    import time
     url = "https://api.line.me/v2/bot/message/reply"
     headers = {
         "Content-Type": "application/json",
@@ -92,17 +93,24 @@ def reply_line_message(reply_token, messages, channel_access_token):
         headers=headers, 
         method='POST'
     )
-    try:
-        with urllib.request.urlopen(req) as res:
-            res.read()
-    except urllib.error.HTTPError as err:
-        err_body = err.read().decode('utf-8') if err.fp else ""
-        print(f"❌ LINE Reply API HTTP Error {err.code}: {err.reason} | Detail: {err_body} | Token prefix: '{channel_access_token[:15]}...'")
-    except Exception as e:
-        print("❌ LINE Reply API Error:", e)
+    for attempt in range(2):
+        try:
+            with urllib.request.urlopen(req, timeout=10) as res:
+                res.read()
+                return
+        except urllib.error.HTTPError as err:
+            err_body = err.read().decode('utf-8') if err.fp else ""
+            print(f"❌ LINE Reply API HTTP Error {err.code}: {err.reason} | Detail: {err_body}")
+            break
+        except Exception as e:
+            if attempt == 0:
+                time.sleep(0.5)
+                continue
+            print("❌ LINE Reply API Error:", e)
 
 
 def push_line_message(to_user_id, messages, channel_access_token):
+    import time
     url = "https://api.line.me/v2/bot/message/push"
     headers = {
         "Content-Type": "application/json",
@@ -112,6 +120,26 @@ def push_line_message(to_user_id, messages, channel_access_token):
         "to": to_user_id,
         "messages": sanitize_to_flex_messages(messages)
     }
+    req = urllib.request.Request(
+        url, 
+        data=json.dumps(body).encode('utf-8'), 
+        headers=headers, 
+        method='POST'
+    )
+    for attempt in range(2):
+        try:
+            with urllib.request.urlopen(req, timeout=10) as res:
+                res.read()
+                return
+        except urllib.error.HTTPError as err:
+            err_body = err.read().decode('utf-8') if err.fp else ""
+            print(f"❌ LINE Push API HTTP Error {err.code}: {err.reason} | Detail: {err_body}")
+            break
+        except Exception as e:
+            if attempt == 0:
+                time.sleep(0.5)
+                continue
+            print("❌ LINE Push API Error:", e)
     req = urllib.request.Request(
         url, 
         data=json.dumps(body).encode('utf-8'), 

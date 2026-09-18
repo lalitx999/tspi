@@ -337,10 +337,36 @@ def build_axes_dashboard_flex(domain_scores, patient_hn=None):
     for i in range(0, len(domain_items), 3):
         chunk = domain_items[i:i+3]
         rows = []
-        for name, score in chunk:
-            score_val = float(score)
-            percentage = min(max(score_val * 10 if score_val <= 10 else score_val, 0), 100)
-            color = "#EF4444" if percentage >= 70 else "#F59E0B" if percentage >= 40 else "#10B981"
+        for name, raw_score in chunk:
+            score_val = 50.0
+            is_na = False
+            if raw_score is None:
+                is_na = True
+                score_val = 0.0
+            elif isinstance(raw_score, (int, float)):
+                score_val = float(raw_score)
+            elif isinstance(raw_score, dict):
+                val = raw_score.get("score")
+                if val is not None and isinstance(val, (int, float)):
+                    score_val = float(val)
+                else:
+                    is_na = True
+                    score_val = 0.0
+            elif isinstance(raw_score, str):
+                try:
+                    score_val = float(raw_score)
+                except ValueError:
+                    is_na = True
+                    score_val = 0.0
+
+            if is_na:
+                percentage = 0.0
+                score_label = "N/A"
+                color = "#94A3B8"
+            else:
+                percentage = min(max(score_val * 10 if score_val <= 10 else score_val, 0), 100)
+                score_label = f"{percentage:.0f}/100"
+                color = "#EF4444" if percentage >= 70 else "#F59E0B" if percentage >= 40 else "#10B981"
 
             rows.append({
                 "type": "box",
@@ -361,7 +387,7 @@ def build_axes_dashboard_flex(domain_scores, patient_hn=None):
                             },
                             {
                                 "type": "text",
-                                "text": f"{percentage:.0f}/100",
+                                "text": score_label,
                                 "size": "xs",
                                 "weight": "bold",
                                 "color": color,

@@ -1282,7 +1282,9 @@ def generate_report_pdf_view(request, patient_id, report_id):
     try:
         from .models import AnalysisRecord
         analysis_record_id = report_obj.get("analysisRecordId")
-        analysis_record = AnalysisRecord.objects.filter(id=analysis_record_id, patient=patient).first() if analysis_record_id else None
+        analysis_record = None
+        if analysis_record_id and (isinstance(analysis_record_id, int) or str(analysis_record_id).isdigit()):
+            analysis_record = AnalysisRecord.objects.filter(id=int(analysis_record_id), patient=patient).first()
 
         if analysis_record:
             thirty_nine_axes = (analysis_record.ledger or {}).get("thirty_nine_axes", {})

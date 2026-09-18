@@ -408,7 +408,7 @@ def line_webhook(request):
                                 headers=ds_headers,
                                 method='POST'
                             )
-                            with urllib.request.urlopen(ds_req) as ds_res:
+                            with urllib.request.urlopen(ds_req, timeout=15) as ds_res:
                                 ds_data = json.loads(ds_res.read().decode('utf-8'))
                                 ai_reply_raw = ds_data['choices'][0]['message']['content'] or ""
                         except Exception as ds_err:
@@ -433,7 +433,7 @@ def line_webhook(request):
                                 headers=groq_headers,
                                 method='POST'
                             )
-                            with urllib.request.urlopen(groq_req) as groq_res:
+                            with urllib.request.urlopen(groq_req, timeout=15) as groq_res:
                                 groq_data = json.loads(groq_res.read().decode('utf-8'))
                                 ai_reply_raw = groq_data['choices'][0]['message']['content'] or ""
                         except Exception as groq_err:
@@ -461,7 +461,7 @@ def line_webhook(request):
                                 headers=gem_headers,
                                 method='POST'
                             )
-                            with urllib.request.urlopen(gem_req) as gem_res:
+                            with urllib.request.urlopen(gem_req, timeout=15) as gem_res:
                                 gem_data = json.loads(gem_res.read().decode('utf-8'))
                                 parts = gem_data['candidates'][0]['content']['parts']
                                 ai_reply_raw = parts[0]['text'] if parts else ""

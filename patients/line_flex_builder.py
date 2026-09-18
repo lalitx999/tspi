@@ -315,6 +315,7 @@ def build_voice_intake_flex(transcript, symptoms, axes_scores=None, patient_hn=N
 def build_axes_dashboard_flex(domain_scores, patient_hn=None):
     """
     Builds a LINE Flex Carousel showing 12 Health Scoring Domains.
+    Uses only validated LINE Flex Message properties.
     """
     if not domain_scores:
         domain_scores = {
@@ -323,19 +324,19 @@ def build_axes_dashboard_flex(domain_scores, patient_hn=None):
             "D3 Microbiome & Gut": 50,
             "D4 Autophagy & Lysosome": 50,
             "D5 Epigenomic & Genomic": 50,
-            "D6 Neuro–Endocrine": 50,
+            "D6 Neuro-Endocrine": 50,
             "D7 Vascular & Microcirc": 50,
             "D8 Fibrosis & ECM": 50,
             "D9 Stem Cell & Hematology": 50,
             "D10 Connective & Bone": 50,
             "D11 Organ Reserve Capacity": 50,
-            "D12 Oncology & Regulation": 50
+            "D12 Oncology & Regulation": 50,
         }
 
     cards = []
     domain_items = list(domain_scores.items())
     for i in range(0, len(domain_items), 3):
-        chunk = domain_items[i:i+3]
+        chunk = domain_items[i:i + 3]
         rows = []
         for name, raw_score in chunk:
             score_val = 50.0
@@ -360,13 +361,44 @@ def build_axes_dashboard_flex(domain_scores, patient_hn=None):
                     score_val = 0.0
 
             if is_na:
-                percentage = 0.0
+                percentage = 0
                 score_label = "N/A"
-                color = "#94A3B8"
+                bar_color = "#94A3B8"
+                status_emoji = "⬜"
             else:
-                percentage = min(max(score_val * 10 if score_val <= 10 else score_val, 0), 100)
-                score_label = f"{percentage:.0f}/100"
-                color = "#EF4444" if percentage >= 70 else "#F59E0B" if percentage >= 40 else "#10B981"
+                percentage = int(min(max(score_val * 10 if score_val <= 10 else score_val, 0), 100))
+                score_label = f"{percentage}/100"
+                if percentage >= 70:
+                    bar_color = "#EF4444"
+                    status_emoji = "🔴"
+                elif percentage >= 40:
+                    bar_color = "#F59E0B"
+                    status_emoji = "🟡"
+                else:
+                    bar_color = "#10B981"
+                    status_emoji = "🟢"
+
+            # Build bar using 10 fixed-width boxes (LINE Flex safe - no % widths)
+            bar_units = percentage // 10  # 0-10 filled units
+            filled_boxes = []
+            for _ in range(bar_units):
+                filled_boxes.append({
+                    "type": "box",
+                    "layout": "vertical",
+                    "width": "8px",
+                    "height": "6px",
+                    "backgroundColor": bar_color,
+                    "contents": []
+                })
+            for _ in range(10 - bar_units):
+                filled_boxes.append({
+                    "type": "box",
+                    "layout": "vertical",
+                    "width": "8px",
+                    "height": "6px",
+                    "backgroundColor": "#E5E7EB",
+                    "contents": []
+                })
 
             rows.append({
                 "type": "box",
@@ -379,19 +411,19 @@ def build_axes_dashboard_flex(domain_scores, patient_hn=None):
                         "contents": [
                             {
                                 "type": "text",
-                                "text": name,
+                                "text": f"{status_emoji} {name}",
                                 "size": "xs",
                                 "weight": "bold",
                                 "color": "#1F2937",
-                                "flex": 3
+                                "flex": 4,
+                                "wrap": True
                             },
                             {
                                 "type": "text",
                                 "text": score_label,
                                 "size": "xs",
                                 "weight": "bold",
-                                "color": color,
-                                "align": "right",
+                                "color": bar_color,
                                 "flex": 1
                             }
                         ]
@@ -399,20 +431,9 @@ def build_axes_dashboard_flex(domain_scores, patient_hn=None):
                     {
                         "type": "box",
                         "layout": "horizontal",
-                        "height": "6px",
-                        "backgroundColor": "#E5E7EB",
-                        "borderRadius": "xs",
                         "margin": "xs",
-                        "contents": [
-                            {
-                                "type": "box",
-                                "layout": "vertical",
-                                "width": f"{percentage:.0f}%",
-                                "backgroundColor": color,
-                                "borderRadius": "xs",
-                                "contents": []
-                            }
-                        ]
+                        "spacing": "none",
+                        "contents": filled_boxes
                     }
                 ]
             })
@@ -428,10 +449,17 @@ def build_axes_dashboard_flex(domain_scores, patient_hn=None):
                 "contents": [
                     {
                         "type": "text",
-                        "text": f"โดเมนสุขภาพ ({i+1}-{min(i+3, len(domain_items))})",
+                        "text": f"Health Domains ({i + 1}-{min(i + 3, len(domain_items))})",
                         "weight": "bold",
                         "color": "#F8FAFC",
                         "size": "sm"
+                    },
+                    {
+                        "type": "text",
+                        "text": f"HN: {patient_hn or '-'} | TSPI 39-Axes",
+                        "size": "xxs",
+                        "color": "#64748B",
+                        "margin": "xs"
                     }
                 ]
             },
@@ -445,7 +473,7 @@ def build_axes_dashboard_flex(domain_scores, patient_hn=None):
 
     return {
         "type": "flex",
-        "altText": "แดชบอร์ดคะแนน 12 โดเมนสุขภาพ TSPI",
+        "altText": "TSPI 12 Health Domain Dashboard",
         "contents": {
             "type": "carousel",
             "contents": cards

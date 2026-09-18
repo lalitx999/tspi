@@ -419,7 +419,7 @@ def build_axes_dashboard_flex(domain_scores, patient_hn=None):
 
         cards.append({
             "type": "bubble",
-            "size": "medium",
+            "size": "kilo",
             "header": {
                 "type": "box",
                 "layout": "vertical",

@@ -278,6 +278,15 @@ def line_webhook(request):
                     LineChat.objects.create(line_user_id=line_user_id, role="assistant", text="[SYSTEM_FLEX: BOT_DEACTIVATED]")
                     continue
 
+                # 2.5 Trigger: Start Medical Intake ("เริ่มซักประวัติ")
+                if msg_type == "text" and ("เริ่มซักประวัติ" in user_text or "เริ่มซักประวัติสุขภาพ" in user_text):
+                    if patient:
+                        start_msg = f"ยินดีรับฟังครับ คุณ{patient.full_name} 😊\n\nกรุณาพิมพ์บอกเล่าอาการไม่สบาย มีอาการปวดตรงไหน เป็นมานานกี่วัน หรือมีอาการอื่นๆ ร่วมด้วยไหมครับ?"
+                        if reply_token:
+                            reply_line_message(reply_token, [{"type": "text", "text": start_msg}], channel_access_token)
+                        LineChat.objects.create(line_user_id=line_user_id, role="assistant", text=start_msg)
+                        continue
+
                 # Check if Bot is currently Active for this LINE user
                 last_sys_chat = LineChat.objects.filter(
                     line_user_id=line_user_id,
@@ -289,7 +298,7 @@ def line_webhook(request):
                     if any(tag in last_sys_chat.text for tag in [
                         "[SYSTEM_FLEX: BOT_ACTIVATED]",
                         "[SYSTEM_FLEX: GREETING_ASK_IDCARD]",
-                        "[SYSTEM_FLEX: VERIFIED_PATIENT]",
+                        "[SYSTEM_FLEX: VERIFIED_PATIENT",
                         "[SYSTEM_FLEX: UNREGISTERED_ID_CARD]"
                     ]):
                         is_bot_active = True

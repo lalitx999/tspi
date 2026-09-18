@@ -61,6 +61,21 @@ def verify_signature(body_text, signature, channel_secret):
     return base64.b64encode(hash_val).decode('utf-8') == signature
 
 
+def sanitize_to_flex_messages(messages):
+    """
+    Guarantees 100% Flex Message compliance for all LINE bot outbound messages.
+    Converts any plain text message into a premium TSPI Clinical AI Flex Card.
+    """
+    flex_messages = []
+    for msg in messages:
+        if isinstance(msg, dict) and msg.get("type") == "text":
+            text_val = msg.get("text", "")
+            flex_messages.append(build_ai_chat_flex(text_val))
+        else:
+            flex_messages.append(msg)
+    return flex_messages
+
+
 def reply_line_message(reply_token, messages, channel_access_token):
     url = "https://api.line.me/v2/bot/message/reply"
     headers = {
@@ -69,7 +84,7 @@ def reply_line_message(reply_token, messages, channel_access_token):
     }
     body = {
         "replyToken": reply_token,
-        "messages": messages
+        "messages": sanitize_to_flex_messages(messages)
     }
     req = urllib.request.Request(
         url, 
@@ -95,7 +110,7 @@ def push_line_message(to_user_id, messages, channel_access_token):
     }
     body = {
         "to": to_user_id,
-        "messages": messages
+        "messages": sanitize_to_flex_messages(messages)
     }
     req = urllib.request.Request(
         url, 
@@ -283,7 +298,8 @@ def line_webhook(request):
                     if patient:
                         start_msg = f"ยินดีรับฟังครับ คุณ{patient.full_name} 😊\n\nกรุณาพิมพ์บอกเล่าอาการไม่สบาย มีอาการปวดตรงไหน เป็นมานานกี่วัน หรือมีอาการอื่นๆ ร่วมด้วยไหมครับ?"
                         if reply_token:
-                            reply_line_message(reply_token, [{"type": "text", "text": start_msg}], channel_access_token)
+                            intake_flex = build_ai_chat_flex(start_msg, patient_name=patient.full_name, patient_hn=patient.hn)
+                            reply_line_message(reply_token, [intake_flex], channel_access_token)
                         LineChat.objects.create(line_user_id=line_user_id, role="assistant", text=start_msg)
                         continue
 

@@ -155,6 +155,31 @@ REST_FRAMEWORK = {
     'PAGE_SIZE': 20,
 }
 
+# Send unhandled request failures to the container's standard output so they
+# are visible through `docker logs`, while keeping Django DEBUG disabled in
+# production and never returning stack traces to patients.
+LOGGING = {
+    'version': 1,
+    'disable_existing_loggers': False,
+    'handlers': {
+        'console': {
+            'class': 'logging.StreamHandler',
+        },
+    },
+    'loggers': {
+        'django.request': {
+            'handlers': ['console'],
+            'level': 'ERROR',
+            'propagate': False,
+        },
+        'accounts': {
+            'handlers': ['console'],
+            'level': 'ERROR',
+            'propagate': False,
+        },
+    },
+}
+
 # ============================================
 # JWT Settings
 # ============================================

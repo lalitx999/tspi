@@ -1,6 +1,10 @@
+import logging
+import os
 import re
+import secrets
 from django.contrib.auth.models import User
 from django.contrib.auth import authenticate
+from django.db import transaction
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
@@ -9,6 +13,8 @@ from rest_framework_simplejwt.tokens import RefreshToken
 
 from patients.models import Patient, PatientBiologicalRecord, AuditLog
 from patients.serializers import PatientSerializer
+
+logger = logging.getLogger(__name__)
 
 def get_tokens_for_user(user):
     refresh = RefreshToken.for_user(user)
@@ -72,6 +78,21 @@ def patient_activate(request):
 @api_view(['POST'])
 @permission_classes([AllowAny])
 def patient_register(request):
+    """Register a patient without leaving a partial account on failure."""
+    try:
+        return _patient_register(request)
+    except Exception:
+        # The traceback is written only to the server log.  Do not expose
+        # database details or patient information in a public API response.
+        logger.exception("Patient registration failed")
+        return Response(
+            {"error": "ระบบลงทะเบียนขัดข้องชั่วคราว กรุณาลองใหม่ภายหลังหรือติดต่อคลินิก"},
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        )
+
+
+@transaction.atomic
+def _patient_register(request):
     """
     Step 2: Proceed with Wizard Registration. Create Django user and link to Patient EMR record in PostgreSQL
     """
@@ -88,16 +109,24 @@ def patient_register(request):
     if not password:
         return Response({"error": "กรุณากำหนดรหัสผ่าน"}, status=status.HTTP_400_BAD_REQUEST)
 
-    # Check if Django User already exists
+    # A previous failed registration from an older version may have created a
+    # login user but not the matching EMR profile.  Do not treat that as a
+    # successful registration or allow a second profile to be created.
     if User.objects.filter(username=id_card).exists():
+        if not Patient.objects.filter(id_card=id_card).exists():
+            return Response(
+                {"error": "พบบัญชีที่ลงทะเบียนไม่สมบูรณ์ กรุณาติดต่อคลินิกเพื่อให้เจ้าหน้าที่ตรวจสอบ"},
+                status=status.HTTP_409_CONFLICT,
+            )
         return Response({"error": "เลขบัตรประชาชนนี้เคยทำการลงทะเบียนแล้ว กรุณาใช้หน้าล็อกอิน"}, status=status.HTTP_400_BAD_REQUEST)
 
     # Create Django User
     try:
         user_email = email if email else f"{id_card}@tspi-patient.com"
         user = User.objects.create_user(username=id_card, email=user_email, password=password)
-    except Exception as e:
-        return Response({"error": f"เกิดข้อผิดพลาดในการสร้างบัญชี: {str(e)}"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+    except Exception:
+        logger.exception("Unable to create patient login account")
+        return Response({"error": "ไม่สามารถสร้างบัญชีผู้ใช้ได้ กรุณาลองใหม่ภายหลัง"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
     # Link/Create Patient profile
     patient = None
@@ -582,7 +611,6 @@ def change_password(request):
         })
     except Exception as e:
         return Response({"error": f"ไม่สามารถเปลี่ยนรหัสผ่านได้: {str(e)}"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-
 
 
 

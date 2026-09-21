@@ -1,6 +1,7 @@
 from django.contrib.auth.models import User
 from django.test import TestCase
 from rest_framework.test import APIClient
+from unittest.mock import patch
 
 from patients.models import Patient, PatientBiologicalRecord, TSPIBrainTrainingLog, ModuleRegistryEntry
 from patients.tspi_engine import (
@@ -10,6 +11,30 @@ from patients.tspi_engine import (
     OFFICIAL_9_STEPS,
 )
 from patients.serializers import PatientSerializer
+
+
+class PatientRegistrationTests(TestCase):
+    def setUp(self):
+        self.client = APIClient()
+        self.payload = {
+            "IDcard": "1234567890123",
+            "password": "safe-test-password",
+            "email": "patient@example.test",
+            "fname": "Test",
+            "lname": "Patient",
+            "sex": "หญิง",
+            "hn": "HN-REGISTRATION-TEST",
+        }
+
+    def test_registration_rolls_back_when_a_later_step_fails(self):
+        """A failed audit write must not leave a usable login without an EMR profile."""
+        with patch("accounts.views.AuditLog.objects.create", side_effect=RuntimeError("audit unavailable")):
+            response = self.client.post("/api/auth/register/", self.payload, format="json")
+
+        self.assertEqual(response.status_code, 500)
+        self.assertEqual(response.data["error"], "ระบบลงทะเบียนขัดข้องชั่วคราว กรุณาลองใหม่ภายหลังหรือติดต่อคลินิก")
+        self.assertFalse(User.objects.filter(username=self.payload["IDcard"]).exists())
+        self.assertFalse(Patient.objects.filter(id_card=self.payload["IDcard"]).exists())
 
 
 def make_patient(**kwargs):

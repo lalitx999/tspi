@@ -290,6 +290,13 @@ class AuditLog(models.Model):
     layer = models.CharField(max_length=10)
     client_ip = models.CharField(max_length=100, blank=True, null=True)
     governance_status = models.CharField(max_length=100, blank=True, null=True)
+    event_type = models.CharField(max_length=80, default="LEGACY", db_index=True)
+    request_method = models.CharField(max_length=10, blank=True)
+    request_path = models.CharField(max_length=500, blank=True, db_index=True)
+    response_status = models.PositiveSmallIntegerField(null=True, blank=True, db_index=True)
+    user_agent = models.CharField(max_length=500, blank=True)
+    request_id = models.UUIDField(null=True, blank=True, db_index=True)
+    metadata = models.JSONField(default=dict, blank=True)
     
     class Meta:
         db_table = 'patient_audit_logs'

@@ -17,6 +17,12 @@ from patients.serializers import PatientSerializer
 
 logger = logging.getLogger(__name__)
 
+
+def get_client_ip(request):
+    """Capture proxy-forwarded client IP without recording request credentials/body."""
+    forwarded = request.META.get("HTTP_X_FORWARDED_FOR", "")
+    return (forwarded.split(",")[0].strip() if forwarded else request.META.get("REMOTE_ADDR", ""))[:100]
+
 def get_tokens_for_user(user):
     refresh = RefreshToken.for_user(user)
     return {
@@ -236,7 +242,7 @@ def _patient_register(request):
         target_id=str(patient.id),
         action="USER_REGISTRATION_SUCCESS",
         layer="AUTH",
-        client_ip="server-side",
+        client_ip=get_client_ip(request),
         governance_status="PATIENT_ACCESSIBLE"
     )
 
@@ -292,7 +298,7 @@ def patient_login(request):
         target_id=str(patient.id),
         action="USER_LOGIN_SUCCESS",
         layer="AUTH",
-        client_ip="server-side",
+        client_ip=get_client_ip(request),
         governance_status="PATIENT_ACCESSIBLE"
     )
 
@@ -395,7 +401,7 @@ def doctor_login(request):
             target_id=str(user.id),
             action="DOCTOR_LOGIN_SUCCESS",
             layer="AUTH",
-            client_ip="server-side",
+            client_ip=get_client_ip(request),
             governance_status="SYSTEM"
         )
 
@@ -432,7 +438,7 @@ def doctor_login(request):
         target_id=str(authenticated_user.id),
         action="DOCTOR_LOGIN_SUCCESS",
         layer="AUTH",
-        client_ip="server-side",
+        client_ip=get_client_ip(request),
         governance_status="SYSTEM"
     )
 
@@ -542,7 +548,7 @@ def doctor_register(request):
         target_id=str(user.id),
         action="DOCTOR_REGISTRATION_SUCCESS",
         layer="AUTH",
-        client_ip="server-side",
+        client_ip=get_client_ip(request),
         governance_status="SYSTEM"
     )
 
@@ -617,7 +623,7 @@ def change_password(request):
             target_id=str(user.id),
             action="USER_PASSWORD_CHANGE_SUCCESS",
             layer="AUTH",
-            client_ip="server-side",
+            client_ip=get_client_ip(request),
             governance_status="PATIENT_ACCESSIBLE"
         )
         
@@ -627,5 +633,4 @@ def change_password(request):
         })
     except Exception as e:
         return Response({"error": f"ไม่สามารถเปลี่ยนรหัสผ่านได้: {str(e)}"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-
 

@@ -1,3 +1,6 @@
+import uuid
+
+from django.core.exceptions import ValidationError
 from django.db import models
 
 class Patient(models.Model):
@@ -159,6 +162,7 @@ class AnalysisRecord(models.Model):
     "หนึ่ง analysis record — หลาย views").
     """
     patient = models.ForeignKey(Patient, on_delete=models.CASCADE, related_name='analysis_records')
+    analysis_run_id = models.UUIDField(default=uuid.uuid4, unique=True, editable=False, db_index=True)
     source_record = models.ForeignKey(
         PatientBiologicalRecord, on_delete=models.SET_NULL, null=True, blank=True,
         related_name='analysis_records'
@@ -169,6 +173,15 @@ class AnalysisRecord(models.Model):
     ledger = models.JSONField(default=dict)
     is_valid = models.BooleanField(default=True)
     invariant_violations = models.JSONField(default=list, blank=True)
+    # Evidence and identity are persisted alongside the ledger, never inferred
+    # from the current patient profile when a historical report is rendered.
+    identity_snapshot = models.JSONField(default=dict, blank=True)
+    evidence_provenance = models.JSONField(default=dict, blank=True)
+    registry_versions = models.JSONField(default=dict, blank=True)
+    created_by = models.ForeignKey(
+        'auth.User', on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='created_analysis_records'
+    )
 
     class Meta:
         db_table = 'patient_analysis_records'
@@ -179,6 +192,53 @@ class AnalysisRecord(models.Model):
 
     def __str__(self):
         return f"AnalysisRecord {self.id} for {self.patient} at {self.created_at}"
+
+    def save(self, *args, **kwargs):
+        """AnalysisRecord is append-only; create a new run instead of overwriting facts."""
+        if self.pk and type(self).objects.filter(pk=self.pk).exists():
+            raise ValidationError("AnalysisRecord is immutable. Create a new analysis run instead of updating it.")
+        return super().save(*args, **kwargs)
+
+
+class AnalysisReportRelease(models.Model):
+    """Append-only approval trail for one report edition of an immutable analysis run."""
+    EDITION_CHOICES = [("PHYSICIAN", "Physician"), ("PATIENT", "Patient"), ("MULTI_OMICS", "Multi-Omics")]
+    STATE_CHOICES = [
+        ("AI_DRAFT", "AI Draft"),
+        ("PHYSICIAN_REVIEWED", "Physician Reviewed"),
+        ("PHYSICIAN_APPROVED", "Physician Approved"),
+        ("PATIENT_RELEASED", "Patient Released"),
+    ]
+    analysis_record = models.ForeignKey(AnalysisRecord, on_delete=models.CASCADE, related_name="report_releases")
+    edition = models.CharField(max_length=20, choices=EDITION_CHOICES)
+    state = models.CharField(max_length=30, choices=STATE_CHOICES, default="AI_DRAFT")
+    note = models.TextField(blank=True)
+    acted_by = models.ForeignKey('auth.User', on_delete=models.SET_NULL, null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = "patient_analysis_report_releases"
+        ordering = ["-created_at"]
+
+    def __str__(self):
+        return f"{self.analysis_record.analysis_run_id} {self.edition}: {self.state}"
+
+
+class AxisScoringContract(models.Model):
+    """Clinician-owned approval registry; no score rule is implied by code alone."""
+    STATUS_CHOICES = [("DRAFT", "Draft"), ("PENDING_APPROVAL", "Pending approval"), ("APPROVED", "Approved"), ("RETIRED", "Retired")]
+    axis_code = models.CharField(max_length=8, unique=True)
+    rule_id = models.CharField(max_length=100, unique=True)
+    version = models.CharField(max_length=40)
+    threshold_spec = models.JSONField(default=dict)
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default="DRAFT")
+    approved_by = models.CharField(max_length=150, blank=True)
+    approved_at = models.DateTimeField(null=True, blank=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "tspi_axis_scoring_contracts"
+        ordering = ["axis_code"]
 
 
 class ModuleRegistryEntry(models.Model):

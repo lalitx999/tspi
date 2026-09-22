@@ -23,6 +23,7 @@ from patients.views_ai import (
     brain_training_stats,
     TSPIBrainTrainingLogViewSet,
     train_brain_model,
+    transition_report_release,
     generate_report_pdf_view,
     ModuleRegistryEntryViewSet
 )
@@ -54,6 +55,6 @@ urlpatterns = [
     path('ai/log-brain-training/', log_brain_training, name='log_brain_training'),
     path('ai/brain-training-stats/', brain_training_stats, name='brain_training_stats'),
     path('ai/train-brain-model/', train_brain_model, name='train_brain_model'),
+    path('ai/report-release-transition/', transition_report_release, name='report_release_transition'),
     path('ai/patients/<str:patient_id>/reports/<str:report_id>/pdf/', generate_report_pdf_view, name='generate_report_pdf'),
 ]
-

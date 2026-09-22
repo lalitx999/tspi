@@ -1,4 +1,4 @@
-from rest_framework import viewsets, permissions
+from rest_framework import viewsets, permissions, status
 from rest_framework.response import Response
 from rest_framework.decorators import action
 from patients.models import Patient, PatientBiologicalRecord, AuditLog, ClinicalKnowledge, TspiSettings, PatientHistory, Appointment, PdpaConsent, AutomationTask
@@ -137,20 +137,42 @@ class PatientViewSet(viewsets.ModelViewSet):
 
     @action(detail=True, methods=['get'], url_path='tspi-analysis')
     def tspi_analysis(self, request, pk=None):
+        """Return the immutable ledger selected for this patient; never recompute here."""
         patient = self.get_object()
-        latest_record = patient.axes_records.all().order_by('-record_date').first()
-        
-        bowel_status = request.query_params.get('bowel_status', 'normal')
-        
-        if not latest_record:
-            from .models import PatientBiologicalRecord
-            latest_record = PatientBiologicalRecord.objects.create(patient=patient)
-            
-        from .tspi_engine import calculate_tspi_analysis
-        result = calculate_tspi_analysis(latest_record, bowel_status=bowel_status)
+        requested_analysis_id = request.query_params.get("analysis_record_id")
+        analysis_records = patient.analysis_records
+        analysis_record = (
+            analysis_records.filter(id=requested_analysis_id).first()
+            if requested_analysis_id
+            else analysis_records.order_by("-created_at").first()
+        )
+        if not analysis_record:
+            return Response(
+                {
+                    "error": "ไม่พบ Analysis Record ที่ผ่านการตรวจสอบ กรุณารันการวิเคราะห์ก่อน",
+                    "required_action": "RUN_VERIFIED_ANALYSIS",
+                },
+                status=status.HTTP_409_CONFLICT,
+            )
+
+        result = analysis_record.ledger.copy()
         result["patient_id"] = patient.id
         result["patient_name"] = f"{patient.first_name} {patient.last_name}"
-        
+        result["analysis_record_id"] = analysis_record.id
+
+        if result.get("analysis_state") == "BLOCKED_DATA_RECONCILIATION":
+            return Response(
+                {
+                    "analysis_record_id": analysis_record.id,
+                    "patient_id": patient.id,
+                    "analysis_state": "BLOCKED_DATA_RECONCILIATION",
+                    "allowed_output": "DATA_RECONCILIATION_REPORT_ONLY",
+                    "identity_validation": result.get("identity_validation", {}),
+                    "conflict_details": result.get("identity_validation", {}).get("conflict_details", []),
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
         return Response(result)
 
     @action(detail=True, methods=['get'], url_path='analysis-records/(?P<record_id>[^/.]+)')
@@ -189,9 +211,10 @@ class PatientViewSet(viewsets.ModelViewSet):
         other_labs = request.data.get('otherLabs', '')
         bowel_status = request.data.get('bowelStatus', 'normal')
         
-        # P0-1 Identity Validator Gate — check demographic / SOAP data consistency
+        # P0-1 Identity Validator Gate — check demographics and source
+        # ownership before any biological record or AnalysisRecord is created.
         from .tspi_engine import validate_patient_identity
-        identity_check = validate_patient_identity({
+        identity_input = {
             "age": getattr(patient, "age", None),
             "gender": getattr(patient, "gender", None),
             "hn": getattr(patient, "hn", None),
@@ -200,7 +223,18 @@ class PatientViewSet(viewsets.ModelViewSet):
             "soap_age": request.data.get("soap_age"),
             "soap_gender": request.data.get("soap_gender"),
             "soap_hn": request.data.get("soap_hn"),
-        })
+            "lab_owner_hn": request.data.get("lab_owner_hn"),
+            "lab_source_record_id": request.data.get("lab_source_record_id"),
+            "source_document_owner_hn": request.data.get("source_document_owner_hn"),
+            "source_document_id": request.data.get("source_document_id"),
+            "clinical_history_owner_hn": request.data.get("clinical_history_owner_hn"),
+            "clinical_history_source_id": request.data.get("clinical_history_source_id"),
+            "source_ownership": request.data.get("source_ownership", []),
+            "omics_clinical_question": request.data.get("omics_clinical_question"),
+            "omics_actionability_plan": request.data.get("omics_actionability_plan"),
+            "omics_informed_consent": request.data.get("omics_informed_consent"),
+        }
+        identity_check = validate_patient_identity(identity_input)
         if identity_check.get("identity_validation_status") == "CONFLICT":
             return Response({
                 "identity_validation": identity_check,
@@ -448,7 +482,12 @@ class PatientViewSet(viewsets.ModelViewSet):
 
         # Run scoring mechanics via tspi_engine.py
         from .tspi_engine import calculate_tspi_analysis
-        tspi_result = calculate_tspi_analysis(new_record, bowel_status=bowel_status, mentzer_index=mentzer_index)
+        tspi_result = calculate_tspi_analysis(
+            new_record,
+            bowel_status=bowel_status,
+            mentzer_index=mentzer_index,
+            patient_data=identity_input,
+        )
         # P1-D: attach marker->axis provenance to the persisted ledger too, not just the
         # immediate response, so it stays auditable alongside the AnalysisRecord it belongs to.
         tspi_result["marker_provenance"] = marker_provenance
@@ -462,7 +501,15 @@ class PatientViewSet(viewsets.ModelViewSet):
         from django.utils import timezone
 
         inputs_payload = json.dumps(
-            {"axes": updated_axes, "bowel_status": bowel_status, "mentzer_index": mentzer_index},
+            {
+                "axes": updated_axes,
+                "bowel_status": bowel_status,
+                "mentzer_index": mentzer_index,
+                "source_ownership": identity_input["source_ownership"],
+                "lab_owner_hn": identity_input["lab_owner_hn"],
+                "source_document_owner_hn": identity_input["source_document_owner_hn"],
+                "clinical_history_owner_hn": identity_input["clinical_history_owner_hn"],
+            },
             sort_keys=True, default=str
         )
         inputs_hash = hashlib.sha256(inputs_payload.encode("utf-8")).hexdigest()
@@ -479,6 +526,21 @@ class PatientViewSet(viewsets.ModelViewSet):
                 ledger=tspi_result,
                 is_valid=tspi_result.get("is_valid", True),
                 invariant_violations=tspi_result.get("invariant_violations", []),
+                identity_snapshot=tspi_result.get("identity_validation", {}),
+                evidence_provenance={
+                    "source_ownership": identity_input["source_ownership"],
+                    "lab_source_record_id": identity_input["lab_source_record_id"],
+                    "source_document_id": identity_input["source_document_id"],
+                    "clinical_history_source_id": identity_input["clinical_history_source_id"],
+                    "marker_provenance": marker_provenance,
+                },
+                registry_versions={
+                    "canonical_registry": tspi_result.get("canonical_registry", {}),
+                    "framework_version": tspi_result.get("framework_version"),
+                    "module_registry": tspi_result.get("module_registry_status", {}),
+                    "network_registry": tspi_result.get("network_registry", {}),
+                },
+                created_by=request.user if request.user.is_authenticated else None,
             )
 
         # 2.5 Save timeline entry in patient_history for real EMR tracking

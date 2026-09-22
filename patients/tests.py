@@ -1,11 +1,14 @@
 from django.contrib.auth.models import User
+from django.core.exceptions import ValidationError
 from django.test import TestCase
 from rest_framework.test import APIClient
 from unittest.mock import patch
 
-from patients.models import Patient, PatientBiologicalRecord, TSPIBrainTrainingLog, ModuleRegistryEntry
+from patients.models import AnalysisRecord, Patient, PatientBiologicalRecord, TSPIBrainTrainingLog, ModuleRegistryEntry
 from patients.tspi_engine import (
     calculate_tspi_analysis,
+    validate_patient_identity,
+    evaluate_omics_utility_gate,
     validate_analysis_record,
     HYPOTHESIS_AXES,
     OFFICIAL_9_STEPS,
@@ -99,6 +102,58 @@ class TspiEngineHypothesisTests(TestCase):
             self.assertIsNone(axis["severity_score"])
 
 
+class IdentityConflictGateTests(TestCase):
+    def setUp(self):
+        self.user = User.objects.create_user(username="clinical-staff", password="test", is_staff=True)
+        self.patient = make_patient(legacy_id="TEST-IDENTITY", hn="HN-IDENTITY", gender="F")
+        self.client = APIClient()
+        self.client.force_authenticate(user=self.user)
+
+    def test_source_owner_hn_mismatch_blocks_analysis(self):
+        result = validate_patient_identity({
+            "hn": "HN-IDENTITY",
+            "lab_owner_hn": "HN-OTHER",
+            "lab_source_record_id": "LAB-42",
+        })
+
+        self.assertEqual(result["identity_validation_status"], "CONFLICT")
+        self.assertEqual(result["analysis_state"], "BLOCKED_DATA_RECONCILIATION")
+        self.assertEqual(result["conflict_details"][0]["conflict_type"], "SOURCE_OWNERSHIP_MISMATCH")
+
+    def test_conflicting_request_creates_no_record_or_analysis_snapshot(self):
+        response = self.client.post(
+            f"/api/patients/{self.patient.id}/calculate-precision-medicine/",
+            {"lab_owner_hn": "HN-OTHER", "lab_source_record_id": "LAB-42"},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.data["analysis_state"], "BLOCKED_DATA_RECONCILIATION")
+        self.assertEqual(PatientBiologicalRecord.objects.filter(patient=self.patient).count(), 0)
+        self.assertEqual(self.patient.analysis_records.count(), 0)
+
+    def test_legacy_analysis_endpoint_returns_reconciliation_only_for_blocked_snapshot(self):
+        source_record = PatientBiologicalRecord.objects.create(patient=self.patient)
+        ledger = calculate_tspi_analysis(
+            source_record,
+            patient_data={"hn": "HN-IDENTITY", "lab_owner_hn": "HN-OTHER"},
+        )
+        record = AnalysisRecord.objects.create(
+            patient=self.patient,
+            source_record=source_record,
+            inputs_hash="blocked-legacy-analysis",
+            ledger=ledger,
+        )
+
+        response = self.client.get(
+            f"/api/patients/{self.patient.id}/tspi-analysis/?analysis_record_id={record.id}"
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.data["allowed_output"], "DATA_RECONCILIATION_REPORT_ONLY")
+        self.assertNotIn("thirty_nine_axes", response.data)
+
+
 class TspiEngineThreeKeysTests(TestCase):
     """ans.txt P0-4.2: Three Keys must always be DERIVED with formula_version/coverage."""
 
@@ -178,6 +233,26 @@ class ValidateAnalysisRecordTests(TestCase):
         self.assertTrue(result["is_valid"])
         self.assertEqual(result["invariant_violations"], [])
 
+    def test_flags_canonical_axis_code_name_mismatch(self):
+        bad_ledger = {
+            "thirty_nine_axes": {
+                **{
+                    f"AXIS_{i}": {"code": f"A{i}", "name": f"Axis {i}"}
+                    for i in range(1, 40)
+                }
+            },
+            "three_keys": {},
+            "nine_restoration_steps": [],
+            "network_registry": {},
+            "module_registry": {},
+            "safety_gate": {},
+        }
+        bad_ledger["thirty_nine_axes"]["AXIS_5"]["name"] = "Wrong name"
+
+        violations = validate_analysis_record(bad_ledger)
+
+        self.assertIn("INV-008", {violation["rule_id"] for violation in violations})
+
 
 class SerializerDefaultScoreTests(TestCase):
     """ans.txt "no default 50" rule — an axis with no record must read NOT_ASSESSED, not 50."""
@@ -240,13 +315,90 @@ class GenerateClinicalPdfGatingTests(TestCase):
 
     def test_hypothesis_axis_not_scored_in_dossier_html(self):
         patient = make_patient(legacy_id="TEST-060")
-        PatientBiologicalRecord.objects.create(patient=patient, axis_8=90)
+        source_record = PatientBiologicalRecord.objects.create(patient=patient, axis_8=90)
+        AnalysisRecord.objects.create(
+            patient=patient,
+            source_record=source_record,
+            inputs_hash="test-hypothesis-pdf",
+            ledger=calculate_tspi_analysis(source_record),
+        )
 
         res = self.client.get(f"/api/ai/generate-clinical-pdf/?patient={patient.id}")
         self.assertEqual(res.status_code, 200)
         html = res.data["html"]
         self.assertIn("Hypothesis", html)
         self.assertNotIn("90/100", html)
+
+    def test_identity_conflict_snapshot_blocks_dossier_generation(self):
+        patient = make_patient(legacy_id="TEST-061", hn="HN-PDF-IDENTITY")
+        source_record = PatientBiologicalRecord.objects.create(patient=patient)
+        blocked_ledger = calculate_tspi_analysis(
+            source_record,
+            patient_data={
+                "hn": "HN-PDF-IDENTITY",
+                "lab_owner_hn": "HN-OTHER",
+                "lab_source_record_id": "LAB-PDF-42",
+            },
+        )
+        analysis_record = AnalysisRecord.objects.create(
+            patient=patient,
+            source_record=source_record,
+            inputs_hash="test-blocked-pdf",
+            ledger=blocked_ledger,
+        )
+
+        res = self.client.get(
+            f"/api/ai/generate-clinical-pdf/?patient={patient.id}&analysis_record_id={analysis_record.id}"
+        )
+
+        self.assertEqual(res.status_code, 400)
+        self.assertIn(b"REPORT GENERATION BLOCKED", res.content)
+        self.assertIn(b"LAB-PDF-42", res.content)
+
+
+class AnalysisRecordProvenanceTests(TestCase):
+    def test_analysis_record_is_append_only(self):
+        patient = make_patient(legacy_id="TEST-062")
+        source_record = PatientBiologicalRecord.objects.create(patient=patient)
+        record = AnalysisRecord.objects.create(
+            patient=patient,
+            source_record=source_record,
+            inputs_hash="immutable-analysis-record",
+            ledger={"analysis_state": "ANALYSIS_READY"},
+            identity_snapshot={"identity_validation_status": "VERIFIED"},
+            evidence_provenance={"source_ownership": []},
+            registry_versions={"canonical_registry": {"version": "test"}},
+        )
+
+        self.assertIsNotNone(record.analysis_run_id)
+        record.ledger = {"analysis_state": "tampered"}
+        with self.assertRaises(ValidationError):
+            record.save()
+
+
+class OmicsUtilityGateTests(TestCase):
+    def test_blocks_omics_without_question_plan_and_consent(self):
+        result = evaluate_omics_utility_gate({})
+        self.assertEqual(result["status"], "BLOCKED_NO_CLINICAL_UTILITY")
+        self.assertIn("clinical_question", result["missing_requirements"])
+
+    def test_allows_omics_only_after_utility_requirements_are_documented(self):
+        result = evaluate_omics_utility_gate({
+            "omics_clinical_question": "Clarify a treatment-resistant phenotype",
+            "omics_actionability_plan": "Review result with physician before any intervention",
+            "omics_informed_consent": True,
+        })
+        self.assertEqual(result["status"], "APPROVED_FOR_ORDERING")
+
+
+class ScoringContractGateTests(TestCase):
+    def test_unapproved_numeric_score_is_not_patient_release_eligible(self):
+        patient = make_patient(legacy_id="TEST-063")
+        record = PatientBiologicalRecord.objects.create(patient=patient, axis_5=85)
+        ledger = calculate_tspi_analysis(record)
+
+        self.assertFalse(ledger["scoring_contracts"]["patient_release_eligible"])
+        self.assertEqual(ledger["scoring_contracts"]["numeric_score_axes"][0]["status"], "MISSING")
 
 
 class MarkerProvenanceTests(TestCase):

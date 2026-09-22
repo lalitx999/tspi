@@ -11,6 +11,51 @@ from rest_framework import status
 
 logger = logging.getLogger(__name__)
 
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def transition_report_release(request):
+    """Create one append-only report-state transition; only clinical staff may sign off."""
+    if not request.user.is_staff:
+        return Response({"error": "Only clinical staff may transition report release state."}, status=status.HTTP_403_FORBIDDEN)
+
+    from .models import AnalysisRecord, AnalysisReportRelease
+
+    analysis_record = AnalysisRecord.objects.filter(id=request.data.get("analysis_record_id")).first()
+    edition = request.data.get("edition")
+    target_state = request.data.get("target_state")
+    if not analysis_record or edition not in {"PHYSICIAN", "PATIENT", "MULTI_OMICS"}:
+        return Response({"error": "Valid analysis_record_id and edition are required."}, status=status.HTTP_400_BAD_REQUEST)
+    if not analysis_record.is_valid:
+        return Response({"error": "Invalid AnalysisRecord cannot be reviewed or released."}, status=status.HTTP_409_CONFLICT)
+    if target_state == "PATIENT_RELEASED" and not (analysis_record.ledger or {}).get("scoring_contracts", {}).get("patient_release_eligible", False):
+        return Response(
+            {"error": "Patient release is blocked until every numeric score has an APPROVED scoring contract."},
+            status=status.HTTP_409_CONFLICT,
+        )
+
+    latest = analysis_record.report_releases.filter(edition=edition).first()
+    expected_next = {
+        None: "AI_DRAFT",
+        "AI_DRAFT": "PHYSICIAN_REVIEWED",
+        "PHYSICIAN_REVIEWED": "PHYSICIAN_APPROVED",
+        "PHYSICIAN_APPROVED": "PATIENT_RELEASED",
+    }.get(latest.state if latest else None)
+    if target_state != expected_next:
+        return Response(
+            {"error": "Invalid report-state transition.", "expected_next_state": expected_next},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    release = AnalysisReportRelease.objects.create(
+        analysis_record=analysis_record,
+        edition=edition,
+        state=target_state,
+        note=str(request.data.get("note") or ""),
+        acted_by=request.user,
+    )
+    return Response({"id": release.id, "analysis_record_id": analysis_record.id, "edition": edition, "state": target_state}, status=status.HTTP_201_CREATED)
+
 # Ensure API Key is loaded
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")
 
@@ -456,13 +501,10 @@ def generate_clinical_pdf(request):
     if not patient:
         return Response({"error": "Patient not found"}, status=status.HTTP_404_NOT_FOUND)
 
-    # P1-A/P1-B: axis names + domain grouping come from tspi_engine.py (single in-repo source
-    # of truth — see ans.txt Section 12 Canonical Lock) instead of reading the frontend's stale
-    # 36-axis tspi_36_axes_v2.json across the repo boundary. Scores/evidence_status come from
-    # calculate_tspi_analysis()'s gated ledger, so a HYPOTHESIS axis never shows a numeric score
-    # here either (this endpoint previously bypassed that gate entirely).
-    from .tspi_engine import calculate_tspi_analysis, OFFICIAL_39_AXES, SYSTEM_DOMAINS
-    from .models import PatientBiologicalRecord as _PBR
+    # Reports must render an existing immutable AnalysisRecord.  Recomputing
+    # from the latest mutable biological record could bypass an identity gate
+    # or silently produce different facts from the other report editions.
+    from .tspi_engine import OFFICIAL_39_AXES, SYSTEM_DOMAINS
 
     domain_by_axis = {}
     for domain_name, domain_info in SYSTEM_DOMAINS.items():
@@ -471,12 +513,30 @@ def generate_clinical_pdf(request):
         for ax in domain_info["axes"]:
             domain_by_axis.setdefault(ax, domain_name)
 
-    latest_record = patient.axes_records.all().order_by('-record_date').first()
-    tspi_result = calculate_tspi_analysis(latest_record if latest_record else _PBR(patient=patient))
-    
+    requested_analysis_id = request.query_params.get("analysis_record_id")
+    analysis_records = patient.analysis_records
+    analysis_record = (
+        analysis_records.filter(id=requested_analysis_id).first()
+        if requested_analysis_id
+        else analysis_records.order_by("-created_at").first()
+    )
+    if not analysis_record:
+        return Response(
+            {
+                "error": "ไม่พบ Analysis Record ที่ผ่านการตรวจสอบ กรุณารันการวิเคราะห์ก่อนสร้างรายงาน",
+                "required_action": "RUN_VERIFIED_ANALYSIS",
+            },
+            status=status.HTTP_409_CONFLICT,
+        )
+
+    tspi_result = analysis_record.ledger
+
     if tspi_result.get("analysis_state") == "BLOCKED_DATA_RECONCILIATION":
         id_val = tspi_result.get("identity_validation", {})
-        conflicts = "<br>".join([f"• {c}" for c in id_val.get("identity_validation_conflicts", [])])
+        conflicts = "<br>".join([
+            f"• {item.get('note', item)}"
+            for item in id_val.get("conflict_details", [])
+        ])
         blocked_html = f"""
         <!DOCTYPE html>
         <html>
@@ -1262,6 +1322,35 @@ def generate_report_pdf_view(request, patient_id, report_id):
         report_type_label = "Patient Edition"
     elif report_type == "multi-omics":
         report_type_label = "Multi-Omics Edition"
+
+    # A patient-facing artifact is never releasable merely because an AI draft
+    # exists in extra_data. It must refer to a valid immutable analysis and a
+    # clinician-created PATIENT_RELEASED transition.
+    if report_type == "patient":
+        from .models import AnalysisRecord, AnalysisReportRelease
+        analysis_record_id = report_obj.get("analysisRecordId")
+        analysis_record = AnalysisRecord.objects.filter(
+            id=analysis_record_id, patient=patient, is_valid=True
+        ).first()
+        is_released = analysis_record and AnalysisReportRelease.objects.filter(
+            analysis_record=analysis_record,
+            edition="PATIENT",
+            state="PATIENT_RELEASED",
+        ).exists()
+        if not is_released:
+            return HttpResponse(
+                "Patient report is not released. Physician approval is required before patient delivery.",
+                status=403,
+            )
+
+    if report_type == "multi-omics":
+        from .models import AnalysisRecord
+        analysis_record = AnalysisRecord.objects.filter(
+            id=report_obj.get("analysisRecordId"), patient=patient, is_valid=True
+        ).first()
+        omics_gate = (analysis_record.ledger or {}).get("omics_utility_gate", {}) if analysis_record else {}
+        if omics_gate.get("status") != "APPROVED_FOR_ORDERING":
+            return HttpResponse("Multi-omics report requires a documented clinical utility gate.", status=409)
         
     created_at = report_obj.get("createdAt", "")
     date_str = ""
@@ -1348,4 +1437,3 @@ def generate_report_pdf_view(request, patient_id, report_id):
     except Exception as e:
         logger.error(f"WeasyPrint PDF generation error: {e}")
         return HttpResponse(f"PDF generation failed: {e}. Please ensure Homebrew system dependencies (pango, cairo) are installed on this machine.", status=500)
-

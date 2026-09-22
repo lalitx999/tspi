@@ -73,6 +73,22 @@ SYSTEM_DOMAINS = {
     "Domain 12 — Oncology & System-Level Regulation": {"code": "D12", "canonical_name": "Oncology & System-Level Regulation", "axes": [36, 37, 38, 39], "domain_type": "PRIMARY"},
 }
 
+CANONICAL_REGISTRY_VERSION = "tspi-core-registry-2026-09-20"
+
+
+def canonical_domain_registry():
+    """Return the immutable 12-domain registry in a renderer-safe shape."""
+    return [
+        {
+            "code": info["code"],
+            "name": info["canonical_name"],
+            "full_title": title,
+            "axis_codes": [f"A{axis}" for axis in info["axes"]],
+            "domain_type": info["domain_type"],
+        }
+        for title, info in SYSTEM_DOMAINS.items()
+    ]
+
 # Module matching now reads from the DB-backed ModuleRegistryEntry
 MASTER_DATA_PATH = os.path.join(settings.BASE_DIR, '..', 'data', 'last_dta', 'TSPI Modules Master Data + Training_Pairs.json')
 NETWORK_REGISTRY_PATH = os.path.join(settings.BASE_DIR, '..', 'data', 'last_dta', '180_Network.json')
@@ -212,8 +228,9 @@ def validate_patient_identity(patient_data: dict) -> dict:
     Treatment suggestions, Patient Report) is BLOCKED until resolved.
 
     Args:
-        patient_data: dict with keys like 'age', 'gender', 'hn',
-                      'soap_age', 'soap_gender', 'birth_year', 'record_date', 'clinical_notes'
+        patient_data: dict with profile fields plus optional ownership fields:
+                      lab_owner_hn, source_document_owner_hn,
+                      clinical_history_owner_hn, and source_ownership[]
     Returns:
         dict with identity_validation_status, analysis_state, conflict_details
     """
@@ -226,6 +243,21 @@ def validate_patient_identity(patient_data: dict) -> dict:
     hn_primary = patient_data.get('hn')
     hn_soap = patient_data.get('soap_hn')
     notes = str(patient_data.get('clinical_notes') or patient_data.get('history') or '')
+
+    def add_owner_conflict(source_type, observed_hn, source_record_id=None):
+        if not hn_primary or not observed_hn:
+            return
+        if str(hn_primary).strip() != str(observed_hn).strip():
+            issues.append({
+                "field": f"{source_type}_ownership",
+                "conflict_type": "SOURCE_OWNERSHIP_MISMATCH",
+                "value_a": f"Requested patient HN: {hn_primary}",
+                "value_b": f"{source_type} owner HN: {observed_hn}",
+                "source_type": source_type,
+                "source_record_id": source_record_id,
+                "severity": "CRITICAL",
+                "note": f"{source_type} belongs to a different HN. Do not mix it into this analysis."
+            })
 
     # Parse clinical notes for demographic text conflicts (e.g. "ชาย 25 ปี" vs Female 52y)
     if notes:
@@ -293,6 +325,28 @@ def validate_patient_identity(patient_data: dict) -> dict:
                 "note": "HN/patient ID mismatch. Do not proceed with analysis."
             })
 
+    # Check 4: Every clinical source must belong to the selected HN.  The
+    # frontend/ingestion layer can send these fields before a formal evidence
+    # table exists; EP 3 will persist the same provenance in AnalysisRecord.
+    add_owner_conflict("lab", patient_data.get("lab_owner_hn"), patient_data.get("lab_source_record_id"))
+    add_owner_conflict(
+        "source_document",
+        patient_data.get("source_document_owner_hn"),
+        patient_data.get("source_document_id"),
+    )
+    add_owner_conflict(
+        "clinical_history",
+        patient_data.get("clinical_history_owner_hn"),
+        patient_data.get("clinical_history_source_id"),
+    )
+    for source in patient_data.get("source_ownership", []) or []:
+        if isinstance(source, dict):
+            add_owner_conflict(
+                source.get("source_type") or "clinical_source",
+                source.get("owner_hn"),
+                source.get("source_record_id"),
+            )
+
     if issues:
         return {
             "identity_validation_status": "CONFLICT",
@@ -306,7 +360,7 @@ def validate_patient_identity(patient_data: dict) -> dict:
                 "physician_report", "multi_omics_report"
             ],
             "physician_action_required": (
-                "Verify DOB, HN, and source document ownership before proceeding. "
+                "Verify DOB, sex, HN, and ownership of every clinical source before proceeding. "
                 "Do not generate clinical conclusions from potentially mixed patient data."
             )
         }
@@ -315,6 +369,47 @@ def validate_patient_identity(patient_data: dict) -> dict:
         "identity_validation_status": "VERIFIED",
         "analysis_state": "ANALYSIS_READY",
         "conflict_details": [],
+    }
+
+
+def evaluate_omics_utility_gate(patient_data: dict) -> dict:
+    """Omics is permitted only for a documented clinical question and actionable plan."""
+    required = {
+        "clinical_question": patient_data.get("omics_clinical_question"),
+        "actionability_plan": patient_data.get("omics_actionability_plan"),
+        "informed_consent": patient_data.get("omics_informed_consent") is True,
+    }
+    missing = [key for key, value in required.items() if not value]
+    if missing:
+        return {
+            "status": "BLOCKED_NO_CLINICAL_UTILITY",
+            "missing_requirements": missing,
+            "allowed_output": "CLINICAL_UTILITY_RECONCILIATION_ONLY",
+        }
+    return {"status": "APPROVED_FOR_ORDERING", "missing_requirements": []}
+
+
+def scoring_contract_snapshot(thirty_nine_axes: dict) -> dict:
+    """Records approval state without inventing a clinical rule when registry is empty."""
+    try:
+        from .models import AxisScoringContract
+        contracts = {item.axis_code: item for item in AxisScoringContract.objects.all()}
+    except Exception:
+        contracts = {}
+    numeric_axes = [axis for axis, value in thirty_nine_axes.items() if value.get("severity_score") is not None]
+    items = []
+    for axis in numeric_axes:
+        code = thirty_nine_axes[axis].get("code")
+        contract = contracts.get(code)
+        items.append({
+            "axis_code": code,
+            "rule_id": contract.rule_id if contract else None,
+            "version": contract.version if contract else None,
+            "status": contract.status if contract else "MISSING",
+        })
+    return {
+        "numeric_score_axes": items,
+        "patient_release_eligible": all(item["status"] == "APPROVED" for item in items),
     }
 
 
@@ -458,7 +553,26 @@ def validate_analysis_record(ledger):
     violations = []
 
     axes = ledger.get("thirty_nine_axes", {}) or {}
+    expected_axis_keys = {f"AXIS_{i}" for i in OFFICIAL_39_AXES}
+    if axes and set(axes) != expected_axis_keys:
+        violations.append({
+            "rule_id": "INV-008",
+            "axis_or_field": "thirty_nine_axes",
+            "message": "Axis registry must contain exactly the canonical AXIS_1 through AXIS_39 keys.",
+        })
     for key, a in axes.items():
+        try:
+            axis_no = int(key.removeprefix("AXIS_"))
+        except ValueError:
+            axis_no = None
+        if axis_no in OFFICIAL_39_AXES and (
+            a.get("code") != f"A{axis_no}" or a.get("name") != OFFICIAL_39_AXES[axis_no]
+        ):
+            violations.append({
+                "rule_id": "INV-008",
+                "axis_or_field": key,
+                "message": f"{key} code/name differs from the canonical axis registry.",
+            })
         if a.get("evidence_status") == "HYPOTHESIS" and a.get("severity_score") is not None:
             violations.append({
                 "rule_id": "INV-001",
@@ -474,14 +588,20 @@ def validate_analysis_record(ledger):
 
     keys = ledger.get("three_keys", {}) or {}
     for key_name, k in keys.items():
-        if k.get("evidence_status") and k.get("evidence_status") != "DERIVED":
+        if k.get("evidence_status") and k.get("evidence_status") not in {"DERIVED", "PARTIAL_NOT_SCORABLE"}:
             violations.append({
                 "rule_id": "INV-003",
                 "axis_or_field": f"three_keys.{key_name}",
-                "message": f'three_keys.{key_name}.evidence_status = "{k.get("evidence_status")}". Must be "DERIVED".',
+                "message": f'three_keys.{key_name}.evidence_status = "{k.get("evidence_status")}". Must be DERIVED or PARTIAL_NOT_SCORABLE.',
             })
 
     steps = ledger.get("nine_restoration_steps", []) or []
+    if len(steps) != len(OFFICIAL_9_STEPS):
+        violations.append({
+            "rule_id": "INV-009",
+            "axis_or_field": "nine_restoration_steps",
+            "message": f"Restoration registry must contain exactly {len(OFFICIAL_9_STEPS)} canonical steps.",
+        })
     for idx, step in enumerate(steps):
         expected_no = idx + 1
         expected_name = OFFICIAL_9_STEPS[idx] if idx < len(OFFICIAL_9_STEPS) else None
@@ -497,6 +617,15 @@ def validate_analysis_record(ledger):
                 "axis_or_field": f"nine_restoration_steps[{idx}].canonical_step_name",
                 "message": f'Step {expected_no} has name="{step.get("canonical_step_name")}", expected "{expected_name}".',
             })
+
+    canonical_domains = ledger.get("canonical_domains", []) or []
+    expected_domains = canonical_domain_registry()
+    if canonical_domains and canonical_domains != expected_domains:
+        violations.append({
+            "rule_id": "INV-010",
+            "axis_or_field": "canonical_domains",
+            "message": "Domain code/name/axis mapping differs from the canonical 12-domain registry.",
+        })
 
     net_reg = ledger.get("network_registry", {}) or {}
     if net_reg.get("registry_status") == "APPROVED":
@@ -573,6 +702,8 @@ def calculate_tspi_analysis(record, bowel_status='normal', mentzer_index=None, p
             "canonical_domains": [],
             "framework_version": "39-axis-master-260715",
         }
+
+    omics_utility_gate = evaluate_omics_utility_gate(patient_data or {})
 
     # 1. Extract the 39 axis scores from the record (clean legacy 50s)
     axes_scores = {}
@@ -964,8 +1095,10 @@ def calculate_tspi_analysis(record, bowel_status='normal', mentzer_index=None, p
         "nine_restoration_steps": nine_restoration_steps,
         "module_registry_status": module_registry_status,
         "thirty_nine_axes": thirty_nine_axes,
+        "scoring_contracts": scoring_contract_snapshot(thirty_nine_axes),
         "network_registry": network_registry,
         "module_registry": module_registry,
+        "omics_utility_gate": omics_utility_gate,
         "safety_gate": {
             "status": safety_status,
             "global_alerts": global_alerts,
@@ -985,10 +1118,13 @@ def calculate_tspi_analysis(record, bowel_status='normal', mentzer_index=None, p
             "rule_id": None,
             "physician_review_required": True,
         },
-        "canonical_domains": [
-            {"code": info["code"], "name": info["canonical_name"], "full_title": title}
-            for title, info in SYSTEM_DOMAINS.items()
-        ],
+        "canonical_registry": {
+            "version": CANONICAL_REGISTRY_VERSION,
+            "axis_count": len(OFFICIAL_39_AXES),
+            "domain_count": len(SYSTEM_DOMAINS),
+            "restoration_step_count": len(OFFICIAL_9_STEPS),
+        },
+        "canonical_domains": canonical_domain_registry(),
         "framework_version": "39-axis-master-260715",
     }
 

@@ -355,6 +355,22 @@ class GenerateClinicalPdfGatingTests(TestCase):
         self.assertIn(b"REPORT GENERATION BLOCKED", res.content)
         self.assertIn(b"LAB-PDF-42", res.content)
 
+    def test_legacy_text_analysis_record_id_does_not_cause_pdf_server_error(self):
+        patient = make_patient(legacy_id="TEST-064")
+        patient.extra_data = {
+            "generated_reports": [{
+                "id": "legacy-report",
+                "reportType": "patient",
+                "analysisRecordId": "TSPI-1790055558179",
+                "report": [],
+            }]
+        }
+        patient.save()
+
+        res = self.client.get(f"/api/ai/patients/{patient.id}/reports/legacy-report/pdf/")
+
+        self.assertEqual(res.status_code, 403)
+
 
 class AnalysisRecordProvenanceTests(TestCase):
     def test_analysis_record_is_append_only(self):

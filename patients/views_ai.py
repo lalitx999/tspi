@@ -1328,10 +1328,16 @@ def generate_report_pdf_view(request, patient_id, report_id):
     # clinician-created PATIENT_RELEASED transition.
     if report_type == "patient":
         from .models import AnalysisRecord, AnalysisReportRelease
-        analysis_record_id = report_obj.get("analysisRecordId")
-        analysis_record = AnalysisRecord.objects.filter(
-            id=analysis_record_id, patient=patient, is_valid=True
-        ).first()
+        raw_analysis_record_id = report_obj.get("analysisRecordId")
+        analysis_record_id = (
+            int(raw_analysis_record_id)
+            if isinstance(raw_analysis_record_id, int) or str(raw_analysis_record_id).isdigit()
+            else None
+        )
+        analysis_record = (
+            AnalysisRecord.objects.filter(id=analysis_record_id, patient=patient, is_valid=True).first()
+            if analysis_record_id is not None else None
+        )
         is_released = analysis_record and AnalysisReportRelease.objects.filter(
             analysis_record=analysis_record,
             edition="PATIENT",
@@ -1345,9 +1351,16 @@ def generate_report_pdf_view(request, patient_id, report_id):
 
     if report_type == "multi-omics":
         from .models import AnalysisRecord
-        analysis_record = AnalysisRecord.objects.filter(
-            id=report_obj.get("analysisRecordId"), patient=patient, is_valid=True
-        ).first()
+        raw_analysis_record_id = report_obj.get("analysisRecordId")
+        analysis_record_id = (
+            int(raw_analysis_record_id)
+            if isinstance(raw_analysis_record_id, int) or str(raw_analysis_record_id).isdigit()
+            else None
+        )
+        analysis_record = (
+            AnalysisRecord.objects.filter(id=analysis_record_id, patient=patient, is_valid=True).first()
+            if analysis_record_id is not None else None
+        )
         omics_gate = (analysis_record.ledger or {}).get("omics_utility_gate", {}) if analysis_record else {}
         if omics_gate.get("status") != "APPROVED_FOR_ORDERING":
             return HttpResponse("Multi-omics report requires a documented clinical utility gate.", status=409)

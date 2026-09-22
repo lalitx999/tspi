@@ -5,6 +5,7 @@ import secrets
 from django.contrib.auth.models import User
 from django.contrib.auth import authenticate
 from django.db import transaction
+from django.utils.dateparse import parse_date
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
@@ -99,6 +100,8 @@ def _patient_register(request):
     id_card = request.data.get("IDcard", "").strip().replace(" ", "")
     password = request.data.get("password", "")
     email = request.data.get("email", "").strip()
+    birth_date_raw = (request.data.get("bd_date") or "").strip()
+    birth_date = parse_date(birth_date_raw) if birth_date_raw else None
     
     is_activation_mode = request.data.get("is_activation_mode", False)
     existing_doc_id = request.data.get("existing_doc_id")
@@ -108,6 +111,9 @@ def _patient_register(request):
     
     if not password:
         return Response({"error": "กรุณากำหนดรหัสผ่าน"}, status=status.HTTP_400_BAD_REQUEST)
+
+    if birth_date_raw and birth_date is None:
+        return Response({"error": "รูปแบบวันเกิดไม่ถูกต้อง"}, status=status.HTTP_400_BAD_REQUEST)
 
     # A previous failed registration from an older version may have created a
     # login user but not the matching EMR profile.  Do not treat that as a
@@ -173,7 +179,7 @@ def _patient_register(request):
             phone=request.data.get("phone", ""),
             email=user_email,
             gender=request.data.get("sex", "O"),
-            birth_date=request.data.get("bd_date") or None,
+            birth_date=birth_date,
             address=request.data.get("address", ""),
             province=request.data.get("province", ""),
             district=request.data.get("district", ""),
@@ -202,15 +208,25 @@ def _patient_register(request):
         patient.line_user_id = line_user_id
         patient.save()
 
-        try:
-            from patients.line_flex_builder import build_verified_patient_flex
-            from patients.views_line import push_line_message
-            channel_access_token = os.environ.get("LINE_DOCTORPATT_CHANNEL_ACCESS_TOKEN", "")
-            if channel_access_token:
-                flex_msg = build_verified_patient_flex(patient)
-                push_line_message(line_user_id, [flex_msg], channel_access_token)
-        except Exception as push_err:
-            print("⚠️ Failed to push welcome LINE Flex Message after registration:", push_err)
+        # A LINE push is an external side effect and cannot be rolled back.
+        # Delay it until PostgreSQL has committed the new patient, otherwise
+        # LINE may receive a false "registration complete" message.
+        patient_id = patient.id
+
+        def push_welcome_after_commit():
+            try:
+                from patients.line_flex_builder import build_verified_patient_flex
+                from patients.views_line import push_line_message
+
+                committed_patient = Patient.objects.get(id=patient_id)
+                channel_access_token = os.environ.get("LINE_DOCTORPATT_CHANNEL_ACCESS_TOKEN", "")
+                if channel_access_token:
+                    flex_msg = build_verified_patient_flex(committed_patient)
+                    push_line_message(line_user_id, [flex_msg], channel_access_token)
+            except Exception:
+                logger.exception("Failed to push LINE welcome message after registration")
+
+        transaction.on_commit(push_welcome_after_commit)
 
     # Generate JWT Tokens for Next.js login state
     tokens = get_tokens_for_user(user)
@@ -611,6 +627,5 @@ def change_password(request):
         })
     except Exception as e:
         return Response({"error": f"ไม่สามารถเปลี่ยนรหัสผ่านได้: {str(e)}"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-
 
 

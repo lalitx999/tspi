@@ -39,6 +39,12 @@ class PatientSerializer(serializers.ModelSerializer):
 
     def get_birthday(self, obj):
         if obj.birth_date:
+            # Django normally returns a date instance, but a newly-created
+            # model can still hold the JSON request string until it is
+            # reloaded from PostgreSQL.  Do not turn a successful
+            # registration into a 500 while serializing that response.
+            if isinstance(obj.birth_date, str):
+                return obj.birth_date
             return obj.birth_date.strftime("%Y-%m-%d")
         return None
 
@@ -205,5 +211,4 @@ class ModuleRegistryEntrySerializer(serializers.ModelSerializer):
         model = ModuleRegistryEntry
         fields = '__all__'
         read_only_fields = ['id', 'code', 'created_at', 'updated_at']
-
 

@@ -36,6 +36,17 @@ class PatientRegistrationTests(TestCase):
         self.assertFalse(User.objects.filter(username=self.payload["IDcard"]).exists())
         self.assertFalse(Patient.objects.filter(id_card=self.payload["IDcard"]).exists())
 
+    def test_serializer_accepts_birth_date_string_on_new_patient_instance(self):
+        patient = Patient(
+            legacy_id="TEST-BIRTHDATE-STRING",
+            first_name="Test",
+            last_name="Patient",
+            phone="0000000000",
+            birth_date="2000-01-31",
+        )
+
+        self.assertEqual(PatientSerializer(patient).data["birthday"], "2000-01-31")
+
 
 def make_patient(**kwargs):
     defaults = dict(
